@@ -40,12 +40,10 @@ def load_rag_data():
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().strip()
-                    if content:
-                        # แยกตามบรรทัดเพื่อดึงเฉพาะย่อหน้าที่ตรงจุด
-                        paragraphs = [p.strip() for p in content.split('\n') if len(p.strip()) > 3]
-                        for p in paragraphs:
-                            chunks.append(p)
-                            sources.append(filename)
+                    paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
+                    for p in paragraphs:
+                        chunks.append(p)
+                        sources.append(filename)
             except Exception:
                 pass
         elif file_path.endswith('.csv'):
@@ -67,7 +65,7 @@ def load_rag_data():
 doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Smart Thai Retrieval Function
+# 3. Smart Thai Retrieval Function (with Threshold)
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
     scores = []
@@ -79,27 +77,36 @@ def retrieve_documents(query, top_k=3):
             if gram in chunk:
                 score += 2
             if gram in source:
-                score += 15  # ค้นเจอชื่อไฟล์ตรงจะได้รับคะแนนสูงสุด
+                score += 10
         scores.append(score)
 
     indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-    top_indices = [idx for idx, sc in indexed_scores[:top_k]]
+    
+    # 🎯 เกณฑ์คะแนนขั้นต่ำ: ถ้าคะแนนสูงสุดยังต่ำกว่า 8 แปลว่าไม่เจอคำตรงประเด็น ให้คืนค่าว่างทันที
+    if not indexed_scores or indexed_scores[0][1] < 8:
+        return [], []
+
+    top_indices = [idx for idx, sc in indexed_scores[:top_k] if sc >= 8]
 
     retrieved_chunks = [doc_chunks[i] for i in top_indices]
     retrieved_sources = [doc_sources[i] for i in top_indices]
     return retrieved_chunks, retrieved_sources
 
 # --------------------------------------------------
-# 4. RAG Response Generation Function (with Safe Fallback)
+# 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
-    context_str = "\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
+    # กรณีไม่พบเอกสารตรงตามเกณฑ์
+    if not retrieved_chunks:
+        return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
+
+    context_str = "\n\n".join(retrieved_chunks)
     valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-โปรดตอบคำถามโดยใช้อ้างอิงจากข้อมูล Context ด้านล่างนี้เท่านั้น ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
-หากใน Context ไม่มีข้อมูลเกี่ยวข้องกับคำถามจริงๆ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
+ตอบคำถามโดยอ้างอิงจาก Context ด้านล่างนี้เท่านั้น ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
+หากใน Context ไม่มีคำตอบสำหรับคำถามนี้ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
 
 Context:
 {context_str}
@@ -107,14 +114,7 @@ Context:
 คำถาม: {query}
 """
 
-    candidate_models = [
-        'gemini-2.0-flash',
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-pro-latest',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro'
-    ]
-
+    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
@@ -124,8 +124,7 @@ Context:
         except Exception:
             continue
 
-    # 🛡️ ระบบสำรองสูงสุด: ดึงข้อความจากไฟล์ Context มาแสดงผลโดยตรง ไม่ให้ขึ้น Error
-    return f"{context_str}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
