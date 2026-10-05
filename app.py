@@ -59,8 +59,8 @@ def load_rag_data():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
-    # สร้าง TF-IDF Vectorizer สำหรับภาษาไทย (ใช้ char_wb analyzer ช่วยตัดคำภาษาไทยได้แม่นยำ)
-    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
+    # ปรับ ngram_range เป็น (1, 3) ให้จับคู่ภาษาไทยสั้นๆ ได้ดีขึ้น
+    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(1, 3))
     tfidf_matrix = vectorizer.fit_transform(chunks)
 
     return chunks, sources, vectorizer, tfidf_matrix
@@ -70,18 +70,17 @@ doc_chunks, doc_sources, vectorizer, tfidf_matrix = load_rag_data()
 # --------------------------------------------------
 # 3. TF-IDF Retrieval Function
 # --------------------------------------------------
-def retrieve_documents(query, top_k=2, similarity_threshold=0.12):
+def retrieve_documents(query, top_k=2, similarity_threshold=0.03):
     query_vec = vectorizer.transform([query])
     cosine_similarities = cosine_similarity(query_vec, tfidf_matrix).flatten()
     
-    # ดึงดรรชนีที่มีค่าความคล้ายคลึงสูงสุด
     top_indices = cosine_similarities.argsort()[::-1]
     
     retrieved_chunks = []
     retrieved_sources = []
     
     for idx in top_indices[:top_k]:
-        # เช็กเกณฑ์คะแนนความเหมือน (Threshold)
+        # ใช้ Threshold 0.03 เพื่อให้คำถามสั้นๆ ดึงข้อมูลออกมาได้
         if cosine_similarities[idx] >= similarity_threshold:
             retrieved_chunks.append(doc_chunks[idx])
             retrieved_sources.append(doc_sources[idx])
@@ -105,7 +104,7 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
 กฎการตอบ:
 1. ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
 2. หาก Context มีข้อมูลตอบ ให้สรุปเนื้อหาตอบตรงๆ
-3. หากใน Context ไม่มีคำตอบสำหรับคำถาม ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น
+3. หากคำถามไม่เกี่ยวข้องกับข้อมูลใน Context หรือไม่มีข้อมูล ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น
 
 Context:
 {context_str}
