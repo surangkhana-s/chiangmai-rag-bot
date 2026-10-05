@@ -26,7 +26,7 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data
+# 2. Load Data (อ่านไฟล์เต็มฉบับป้องกันข้อมูลขาด)
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -39,10 +39,9 @@ def load_rag_data():
         if file_path.endswith('.txt') or file_path.endswith('.md'):
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                    paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
-                    for p in paragraphs:
-                        chunks.append(p)
+                    content = f.read().strip()
+                    if content:
+                        chunks.append(content)
                         sources.append(filename)
             except Exception:
                 pass
@@ -65,11 +64,10 @@ def load_rag_data():
 doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Smart Thai Retrieval Function (Sub-string / N-gram Matching)
+# 3. Retrieval Function
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
     scores = []
-    # สแกนคำค้นหาย่อยทีละ 2-3 ตัวอักษร เพื่อรองรับภาษาไทยที่ไม่มีเว้นวรรค
     search_grams = [query[i:i+3] for i in range(len(query)-2)] if len(query) >= 3 else [query]
     
     for chunk, source in zip(doc_chunks, doc_sources):
@@ -78,7 +76,7 @@ def retrieve_documents(query, top_k=3):
             if gram in chunk:
                 score += 2
             if gram in source:
-                score += 5  # ให้คะแนนพิเศษถ้าชื่อไฟล์ตรงกับคำถาม
+                score += 10
         scores.append(score)
 
     indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
@@ -96,9 +94,9 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
-    prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ 
-ให้อ้างอิงข้อมูลจาก Context ด้านล่างนี้เท่านั้นในการตอบคำถาม
-ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น ห้ามแสดงขั้นตอนการคิด หากใน Context ไม่มีข้อมูลให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
+    prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
+โปรดตอบคำถามโดยใช้อาจารอ้างอิงจากข้อมูล Context ด้านล่างนี้ ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
+หากใน Context ไม่มีข้อมูลเกี่ยวข้องกับคำถามจริงๆ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
 
 Context:
 {context_str}
@@ -106,17 +104,19 @@ Context:
 คำถาม: {query}
 """
 
-    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
+    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'models/gemini-1.5-flash']
+    last_error = ""
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response and response.text:
                 return f"{response.text.strip()}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-        except Exception:
+        except Exception as e:
+            last_error = str(e)
             continue
 
-    return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    return f"❌ **เกิดข้อผิดพลาด API:** `{last_error}`\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
