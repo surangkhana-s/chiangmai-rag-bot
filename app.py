@@ -3,8 +3,6 @@ import glob
 import pandas as pd
 import streamlit as st
 import google.generativeai as genai
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 # --------------------------------------------------
 # Page Configuration
@@ -28,13 +26,13 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data & Prepare Vectorizer
+# 2. Load All Data (โหลดเอกสารทั้งหมดเข้า Memory)
 # --------------------------------------------------
 @st.cache_resource
-def load_rag_data():
-    chunks = []
-    sources = []
+def load_all_documents():
     data_files = glob.glob("data/*")
+    full_context = ""
+    file_list = []
     
     for file_path in data_files:
         filename = os.path.basename(file_path)
@@ -43,71 +41,41 @@ def load_rag_data():
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().strip()
                     if content:
-                        chunks.append(content)
-                        sources.append(filename)
+                        full_context += f"\n\n--- เอกสาร: {filename} ---\n{content}"
+                        file_list.append(filename)
             except Exception:
                 pass
         elif file_path.endswith('.csv'):
             try:
                 df = pd.read_csv(file_path)
-                chunks.append(df.to_string())
-                sources.append(filename)
+                full_context += f"\n\n--- เอกสาร: {filename} ---\n{df.to_string()}"
+                file_list.append(filename)
             except Exception:
                 pass
 
-    if not chunks:
-        chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
-        sources = ["none"]
+    return full_context, file_list
 
-    # ปรับ ngram_range เป็น (1, 3) ให้จับคู่ภาษาไทยสั้นๆ ได้ดีขึ้น
-    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(1, 3))
-    tfidf_matrix = vectorizer.fit_transform(chunks)
-
-    return chunks, sources, vectorizer, tfidf_matrix
-
-doc_chunks, doc_sources, vectorizer, tfidf_matrix = load_rag_data()
+full_context, file_list = load_all_documents()
 
 # --------------------------------------------------
-# 3. TF-IDF Retrieval Function
+# 3. Direct RAG Generation (ให้ Gemini ค้นหาและตัดสินใจเอง)
 # --------------------------------------------------
-def retrieve_documents(query, top_k=2, similarity_threshold=0.03):
-    query_vec = vectorizer.transform([query])
-    cosine_similarities = cosine_similarity(query_vec, tfidf_matrix).flatten()
-    
-    top_indices = cosine_similarities.argsort()[::-1]
-    
-    retrieved_chunks = []
-    retrieved_sources = []
-    
-    for idx in top_indices[:top_k]:
-        # ใช้ Threshold 0.03 เพื่อให้คำถามสั้นๆ ดึงข้อมูลออกมาได้
-        if cosine_similarities[idx] >= similarity_threshold:
-            retrieved_chunks.append(doc_chunks[idx])
-            retrieved_sources.append(doc_sources[idx])
-            
-    return retrieved_chunks, retrieved_sources
-
-# --------------------------------------------------
-# 4. RAG Response Generation Function
-# --------------------------------------------------
-def generate_rag_response(query, retrieved_chunks, retrieved_sources):
-    if not retrieved_chunks:
+def generate_rag_response(query):
+    if not full_context.strip():
         return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
-    context_str = "\n\n---\n\n".join(retrieved_chunks)
-    valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
-    sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
-
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-โปรดตอบคำถามโดยอ้างอิงข้อมูลจาก Context ด้านล่างนี้เท่านั้น
+โปรดตอบคำถามโดยอ้างอิงจากข้อมูลในคลังเอกสาร Context ด้านล่างนี้เท่านั้น
 
-กฎการตอบ:
-1. ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
-2. หาก Context มีข้อมูลตอบ ให้สรุปเนื้อหาตอบตรงๆ
-3. หากคำถามไม่เกี่ยวข้องกับข้อมูลใน Context หรือไม่มีข้อมูล ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น
+กฎเหล็กในการตอบ:
+1. หากใน Context มีข้อมูลตอบคำถาม ให้ตอบคำถามเป็นภาษาไทย สั้น กระชับ ตรงประเด็น และในบรรทัดสุดท้ายให้ระบุชื่อไฟล์เอกสารที่ใช้ตอบคำถามในรูปแบบ '📄 **เอกสารอ้างอิง:** ชื่อไฟล์.txt' (เช่น 📄 **เอกสารอ้างอิง:** 01_doi_suthep.txt)
+2. หากใน Context ไม่มีข้อมูลที่ตอบคำถามได้เลย หรือเป็นคำถามที่ไม่เกี่ยวกับคลังเอกสาร (เช่น ถามเรื่องญี่ปุ่น หรือสิ่งที่ไม่ใช่เชียงใหม่) ให้ตอบรูปแบบนี้เท่านั้น:
+ไม่พบข้อมูลในเอกสารอ้างอิง
 
-Context:
-{context_str}
+📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง
+
+คลังเอกสาร Context:
+{full_context}
 
 คำถาม: {query}
 """
@@ -118,17 +86,14 @@ Context:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response and response.text:
-                res_text = response.text.strip()
-                if "ไม่พบข้อมูล" in res_text:
-                    return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
-                return f"{res_text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+                return response.text.strip()
         except Exception:
             continue
 
     return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
 # --------------------------------------------------
-# 5. Streamlit Chat Interface
+# 4. Streamlit Chat Interface
 # --------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -144,8 +109,7 @@ if user_query := st.chat_input("พิมพ์คำถามเกี่ยว
 
     with st.chat_message("assistant"):
         with st.spinner("กำลังประมวลผลคำตอบ..."):
-            retrieved_chunks, retrieved_sources = retrieve_documents(user_query)
-            answer = generate_rag_response(user_query, retrieved_chunks, retrieved_sources)
+            answer = generate_rag_response(user_query)
             st.markdown(answer)
             
     st.session_state.messages.append({"role": "assistant", "content": answer})
