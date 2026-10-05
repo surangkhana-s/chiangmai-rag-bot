@@ -62,27 +62,29 @@ def load_rag_data():
 doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Smart Thai Retrieval Function
+# 3. Smart Thai Retrieval Function (Strict Matching)
 # --------------------------------------------------
 def retrieve_documents(query, top_k=2):
     scores = []
-    search_grams = [query[i:i+2] for i in range(len(query)-1)] if len(query) >= 2 else [query]
+    # ตัดคำค้นหาเป็น N-gram 3 ตัวอักษรเพื่อความแม่นยำสูงขึ้น
+    search_grams = [query[i:i+3] for i in range(len(query)-2)] if len(query) >= 3 else [query]
     
     for chunk, source in zip(doc_chunks, doc_sources):
         score = 0
         for gram in search_grams:
             if gram in chunk:
-                score += 1
+                score += 2
             if gram in source:
-                score += 5
+                score += 10
         scores.append(score)
 
     indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     
-    if not indexed_scores or indexed_scores[0][1] == 0:
+    # 🎯 ตั้งเกณฑ์คะแนนขั้นต่ำ (ถ้าไม่เจอคำตรงประเด็นจริงๆ ให้ถือว่าไม่พบเอกสาร)
+    if not indexed_scores or indexed_scores[0][1] < 12:
         return [], []
 
-    top_indices = [idx for idx, sc in indexed_scores[:top_k] if sc > 0]
+    top_indices = [idx for idx, sc in indexed_scores[:top_k] if sc >= 12]
     retrieved_chunks = [doc_chunks[i] for i in top_indices]
     retrieved_sources = [doc_sources[i] for i in top_indices]
     return retrieved_chunks, retrieved_sources
@@ -91,6 +93,7 @@ def retrieve_documents(query, top_k=2):
 # 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
+    # หากค้นไม่พบเอกสารตามเกณฑ์ ให้ตอบไม่พบข้อมูลทันที
     if not retrieved_chunks:
         return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
@@ -99,7 +102,12 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-โปรดตอบคำถามโดยสรุปจากข้อมูล Context ด้านล่างนี้เป็นภาษาไทย
+โปรดตอบคำถามโดยอ้างอิงข้อมูลจาก Context ด้านล่างนี้เท่านั้น
+
+กฎการตอบ:
+1. ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
+2. หาก Context มีคำตอบ ให้ตอบเฉพาะสิ่งที่ถาม
+3. หากคำถามไม่เกี่ยวกับข้อมูลใน Context หรือใน Context ไม่มีข้อมูล ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น
 
 Context:
 {context_str}
@@ -113,12 +121,14 @@ Context:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response and response.text:
-                return f"{response.text.strip()}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+                res_text = response.text.strip()
+                if "ไม่พบข้อมูล" in res_text:
+                    return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
+                return f"{res_text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
         except Exception:
             continue
 
-    # 🛡️ Fallback ไม้ตาย: แสดงเนื้อหาจาก Context ตรงๆ เมื่อ API ไม่ตอบสนอง
-    return f"**ข้อมูลจากคลังเอกสาร:**\n{context_str}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
