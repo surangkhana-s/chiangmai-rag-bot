@@ -28,7 +28,7 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data & Create Vector Search via Gemini API (Save RAM)
+# 2. Load Data & Batch Vector Search via Gemini API (Fast Load)
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -59,14 +59,17 @@ def load_rag_data():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
-    # ฝัง Vector ผ่าน Gemini Embedding API (ประหยัดแรม ไม่ต้องโหลดไฟล์โมเดลลงเซิร์ฟเวอร์)
+    # Batch Embedding ส่งประมวลผลชุดละ 50 รายการเพื่อความเร็วสูงสุด
     vectors = []
-    for chunk in chunks:
+    batch_size = 50
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i+batch_size]
         try:
-            res = genai.embed_content(model="models/text-embedding-004", content=chunk)
-            vectors.append(res['embedding'])
+            res = genai.embed_content(model="models/text-embedding-004", content=batch)
+            vectors.extend(res['embedding'])
         except Exception:
-            vectors.append([0.0]*768)
+            for _ in batch:
+                vectors.append([0.0]*768)
             
     return np.array(vectors, dtype='float32'), chunks, sources
 
@@ -80,7 +83,6 @@ def retrieve_documents(query, top_k=3):
         res = genai.embed_content(model="models/text-embedding-004", content=query)
         q_vec = np.array(res['embedding'], dtype='float32')
         
-        # คำนวณ Cosine Similarity ด้วย Numpy
         norms = np.linalg.norm(doc_vectors, axis=1) * np.linalg.norm(q_vec)
         norms[norms == 0] = 1e-10
         scores = np.dot(doc_vectors, q_vec) / norms
