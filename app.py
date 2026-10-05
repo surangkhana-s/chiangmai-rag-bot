@@ -1,6 +1,5 @@
 import os
 import glob
-import re
 import pandas as pd
 import streamlit as st
 import google.generativeai as genai
@@ -66,19 +65,20 @@ def load_rag_data():
 doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Retrieval Function
+# 3. Smart Thai Retrieval Function (Sub-string / N-gram Matching)
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
-    clean_query = re.sub(r'[^\w\s]', '', query)
-    words = [w for w in clean_query.split() if len(w) > 1]
-    if not words:
-        words = [query]
-
     scores = []
-    for chunk in doc_chunks:
-        score = sum(chunk.count(w) for w in words)
-        if query in chunk:
-            score += 10
+    # สแกนคำค้นหาย่อยทีละ 2-3 ตัวอักษร เพื่อรองรับภาษาไทยที่ไม่มีเว้นวรรค
+    search_grams = [query[i:i+3] for i in range(len(query)-2)] if len(query) >= 3 else [query]
+    
+    for chunk, source in zip(doc_chunks, doc_sources):
+        score = 0
+        for gram in search_grams:
+            if gram in chunk:
+                score += 2
+            if gram in source:
+                score += 5  # ให้คะแนนพิเศษถ้าชื่อไฟล์ตรงกับคำถาม
         scores.append(score)
 
     indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
