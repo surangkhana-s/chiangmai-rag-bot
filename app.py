@@ -1,5 +1,7 @@
 import os
 import glob
+import json
+import re
 import pandas as pd
 import numpy as np
 import faiss
@@ -12,7 +14,7 @@ from sentence_transformers import SentenceTransformer
 # --------------------------------------------------
 st.set_page_config(
     page_title="ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่",
-    page_icon="🏔️️",
+    page_icon="🏔️",
     layout="centered"
 )
 
@@ -20,7 +22,7 @@ st.title("🏔️ ผู้ช่วยตอบคำถามการท่�
 st.caption("ระบบตอบคำถามจากคลังเอกสารความรู้การท่องเที่ยวเชียงใหม่ ด้วยเทคโนโลยี RAG")
 
 # --------------------------------------------------
-# 1. API Key & Model Setup (Gemini API via Streamlit Secrets)
+# 1. API Key & Model Setup
 # --------------------------------------------------
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("❌ ไม่พบ GEMINI_API_KEY ใน Streamlit Secrets กรุณาตั้งค่าใน Streamlit Cloud")
@@ -73,7 +75,7 @@ def load_rag_system():
 embedder, faiss_index, doc_chunks, doc_sources = load_rag_system()
 
 # --------------------------------------------------
-# 3. Retrieval Function (ค้นหาเอกสารผ่าน FAISS)
+# 3. Retrieval Function
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
     query_vector = embedder.encode([query], convert_to_numpy=True).astype('float32')
@@ -89,23 +91,27 @@ def retrieve_documents(query, top_k=3):
     return retrieved_chunks, retrieved_sources
 
 # --------------------------------------------------
-# 4. RAG Response Generation Function
+# 4. RAG Response Generation Function (JSON Mode + Python Cleanup)
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
     valid_sources = [s for s in set(retrieved_sources) if s != "none"]
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
-    # กำหนด System Instruction บังคับกฎให้ AI อย่างเข้มงวด
     sys_instruction = (
         "คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ "
-        "ข้อบังคับเข้มงวด: ตอบเป็นภาษาไทยเท่านั้น ตอบสั้นกระชับตรงประเด็น "
-        "และตอบเฉพาะเนื้อหาคำตอบสุดท้ายเท่านั้น ห้ามทวนคำสั่ง ห้ามแสดงขั้นตอนการคิด "
-        "ห้ามวิเคราะห์กฎเกณฑ์ และห้ามแปลเป็นภาษาอังกฤษเด็ดขาด "
-        "ให้อ้างอิงเฉพาะข้อมูลใน Context ที่ให้มาเท่านั้น หาก Context ไม่มีข้อมูลที่ใช้ตอบคำถามได้ ให้ตอบคำว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
+        "ให้ตอบคำถามโดยใช้อ้างอิงจาก Context ที่กำหนดให้เท่านั้น "
+        "หากไม่มีข้อมูลใน Context ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
     )
-    
-    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
+
+    user_prompt = f"""Context:
+{context_str}
+
+คำถาม: {query}
+
+กรุณาตอบคำถามเป็นรูปแบบ JSON เท่านั้น ดังตัวอย่าง:
+{{"answer": "คำตอบภาษาไทยสั้นๆ ตรงประเด็น"}}
+"""
 
     try:
         active_models = [
@@ -125,14 +131,37 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
                 model_name=model_name,
                 system_instruction=sys_instruction
             )
-            response = model.generate_content(
-                user_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.0
+            
+            # บังคับส่งออกเป็น JSON
+            try:
+                response = model.generate_content(
+                    user_prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.0,
+                        response_mime_type="application/json"
+                    )
                 )
-            )
-            if response and response.text:
-                return f"{response.text.strip()}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+                data = json.loads(response.text)
+                answer_text = data.get("answer", response.text)
+            except Exception:
+                # Fallback สำหรับโมเดลที่ตัดคำด้วย Python
+                response = model.generate_content(
+                    user_prompt,
+                    generation_config=genai.types.GenerationConfig(temperature=0.0)
+                )
+                raw_text = response.text.strip()
+                if "{" in raw_text and "}" in raw_text:
+                    match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+                    data = json.loads(match.group(0)) if match else {}
+                    answer_text = data.get("answer", raw_text)
+                else:
+                    lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+                    answer_text = lines[-1] if lines else raw_text
+
+            # ทำความสะอาดสตริงครั้งสุดท้าย
+            clean_answer = str(answer_text).replace('"', '').replace("'", "").strip()
+            return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+
         except Exception as e:
             last_error = str(e)
             continue
