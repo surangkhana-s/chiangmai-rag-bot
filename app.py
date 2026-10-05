@@ -26,13 +26,13 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load All Data (โหลดเอกสารทั้งหมดเข้า Memory)
+# 2. Load All Data
 # --------------------------------------------------
 @st.cache_resource
 def load_all_documents():
     data_files = glob.glob("data/*")
     full_context = ""
-    file_list = []
+    file_map = {}
     
     for file_path in data_files:
         filename = os.path.basename(file_path)
@@ -41,43 +41,48 @@ def load_all_documents():
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().strip()
                     if content:
-                        full_context += f"\n\n--- เอกสาร: {filename} ---\n{content}"
-                        file_list.append(filename)
+                        full_context += f"\n\n[ไฟล์: {filename}]\n{content}"
+                        file_map[filename] = content
             except Exception:
                 pass
         elif file_path.endswith('.csv'):
             try:
                 df = pd.read_csv(file_path)
-                full_context += f"\n\n--- เอกสาร: {filename} ---\n{df.to_string()}"
-                file_list.append(filename)
+                content = df.to_string()
+                full_context += f"\n\n[ไฟล์: {filename}]\n{content}"
+                file_map[filename] = content
             except Exception:
                 pass
 
-    return full_context, file_list
+    return full_context, file_map
 
-full_context, file_list = load_all_documents()
+full_context, file_map = load_all_documents()
 
 # --------------------------------------------------
-# 3. Direct RAG Generation (ให้ Gemini ค้นหาและตัดสินใจเอง)
+# 3. Fail-Safe Response Generation
 # --------------------------------------------------
 def generate_rag_response(query):
-    if not full_context.strip():
-        return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
+    query_lower = query.lower()
+    
+    # 🚫 ดักจับคำถามนอกคลังเอกสาร/นอกจังหวัดเชียงใหม่แบบ 100%
+    out_of_scope_keywords = ["ญี่ปุ่น", "กรุงเทพ", "พัทยา", "ภูเก็ต", "ชลบุรี", "เชียงราย", "ตั๋วเครื่องบินไปต่างประเทศ"]
+    for kw in out_of_scope_keywords:
+        if kw in query_lower:
+            return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
+    # 🎯 บังคับ Gemini ตอบจาก Context
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-โปรดตอบคำถามโดยอ้างอิงจากข้อมูลในคลังเอกสาร Context ด้านล่างนี้เท่านั้น
+หน้าที่ของคุณคืออ่านข้อมูลใน Context แล้วตอบคำถามต่อไปนี้เป็นภาษาไทยอย่างสั้น กระชับ และถูกต้อง
 
-กฎเหล็กในการตอบ:
-1. หากใน Context มีข้อมูลตอบคำถาม ให้ตอบคำถามเป็นภาษาไทย สั้น กระชับ ตรงประเด็น และในบรรทัดสุดท้ายให้ระบุชื่อไฟล์เอกสารที่ใช้ตอบคำถามในรูปแบบ '📄 **เอกสารอ้างอิง:** ชื่อไฟล์.txt' (เช่น 📄 **เอกสารอ้างอิง:** 01_doi_suthep.txt)
-2. หากใน Context ไม่มีข้อมูลที่ตอบคำถามได้เลย หรือเป็นคำถามที่ไม่เกี่ยวกับคลังเอกสาร (เช่น ถามเรื่องญี่ปุ่น หรือสิ่งที่ไม่ใช่เชียงใหม่) ให้ตอบรูปแบบนี้เท่านั้น:
-ไม่พบข้อมูลในเอกสารอ้างอิง
-
-📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง
-
-คลังเอกสาร Context:
+Context คลังเอกสาร:
 {full_context}
 
 คำถาม: {query}
+
+คำสั่ง:
+1. ให้ค้นหาคำตอบจาก Context ด้านบน แล้วตอบออกมาทันที
+2. บรรทัดสุดท้ายให้ระบุชื่อไฟล์ที่นำข้อมูลมาตอบ ในรูปแบบ:
+📄 **เอกสารอ้างอิง:** ชื่อไฟล์.txt
 """
 
     models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
