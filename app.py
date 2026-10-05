@@ -26,7 +26,7 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data
+# 2. Load Data (โหลดเนื้อหาเต็มทั้งไฟล์ ป้องกันข้อมูลตกหล่น)
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -40,19 +40,16 @@ def load_rag_data():
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().strip()
-                    paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
-                    for p in paragraphs:
-                        chunks.append(p)
+                    if content:
+                        chunks.append(content)
                         sources.append(filename)
             except Exception:
                 pass
         elif file_path.endswith('.csv'):
             try:
                 df = pd.read_csv(file_path)
-                for _, row in df.iterrows():
-                    text = " ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
-                    chunks.append(text)
-                    sources.append(filename)
+                chunks.append(df.to_string())
+                sources.append(filename)
             except Exception:
                 pass
 
@@ -65,28 +62,30 @@ def load_rag_data():
 doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Smart Thai Retrieval Function (with Threshold)
+# 3. Smart Thai Retrieval Function
 # --------------------------------------------------
-def retrieve_documents(query, top_k=3):
+def retrieve_documents(query, top_k=2):
     scores = []
-    search_grams = [query[i:i+3] for i in range(len(query)-2)] if len(query) >= 3 else [query]
+    # ตัดคำแบบ N-gram 2 ตัวอักษรเพื่อรองรับภาษาไทย
+    search_grams = [query[i:i+2] for i in range(len(query)-1)] if len(query) >= 2 else [query]
     
     for chunk, source in zip(doc_chunks, doc_sources):
         score = 0
         for gram in search_grams:
             if gram in chunk:
-                score += 2
+                score += 1
             if gram in source:
-                score += 10
+                score += 5
         scores.append(score)
 
     indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     
-    # 🎯 เกณฑ์คะแนนขั้นต่ำ: ถ้าคะแนนสูงสุดยังต่ำกว่า 8 แปลว่าไม่เจอคำตรงประเด็น ให้คืนค่าว่างทันที
-    if not indexed_scores or indexed_scores[0][1] < 8:
+    # ถ้าไม่มีคำไหนตรงเลยสักนิดเดียว ให้คืนค่าว่าง
+    if not indexed_scores or indexed_scores[0][1] == 0:
         return [], []
 
-    top_indices = [idx for idx, sc in indexed_scores[:top_k] if sc >= 8]
+    # ดึงไฟล์ที่คะแนนสูงสุด top_k อันดับแรก
+    top_indices = [idx for idx, sc in indexed_scores[:top_k] if sc > 0]
 
     retrieved_chunks = [doc_chunks[i] for i in top_indices]
     retrieved_sources = [doc_sources[i] for i in top_indices]
@@ -96,17 +95,20 @@ def retrieve_documents(query, top_k=3):
 # 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
-    # กรณีไม่พบเอกสารตรงตามเกณฑ์
     if not retrieved_chunks:
         return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
-    context_str = "\n\n".join(retrieved_chunks)
+    context_str = "\n\n---\n\n".join(retrieved_chunks)
     valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-ตอบคำถามโดยอ้างอิงจาก Context ด้านล่างนี้เท่านั้น ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
-หากใน Context ไม่มีคำตอบสำหรับคำถามนี้ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
+โปรดตอบคำถามโดยใช้ข้อมูลจาก Context ด้านล่างนี้เป็นหลัก
+
+กฎการตอบ:
+1. ตอบคำถามให้ตรงประเด็น สั้น กระชับ เป็นภาษาไทย
+2. หากใน Context มีข้อมูล ให้นำมาตอบทันที
+3. หากใน Context ไม่มีข้อมูลเกี่ยวกับคำถามนี้จริงๆ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
 
 Context:
 {context_str}
@@ -114,7 +116,7 @@ Context:
 คำถาม: {query}
 """
 
-    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
+    candidate_models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(model_name)
