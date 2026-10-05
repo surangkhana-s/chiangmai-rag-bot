@@ -111,29 +111,31 @@ Context ที่ค้นหาได้:
 คำถาม: {query}
 """
 
-    candidate_models = [
-        'gemini-1.5-flash',
-        'gemini-1.5-pro',
-        'models/gemini-1.5-flash',
-        'models/gemini-1.5-pro',
-        'gemini-pro'
-    ]
-    
-    response_text = None
-    for model_name in candidate_models:
+    # สอบถาม Google API โดยตรงว่า API Key นี้มีสิทธิ์ใช้โมเดลชื่ออะไรบ้าง
+    try:
+        active_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+    except Exception as e:
+        return f"❌ **เกิดข้อผิดพลาดจาก API Key:**\n`{str(e)}`\n\n*แนะนำ: ลองสร้าง API Key ใหม่ที่ https://aistudio.google.com/ แล้วนำมาใส่ใน Streamlit Secrets*"
+
+    if not active_models:
+        return "❌ API Key นี้ไม่มีโมเดลที่รองรับ generateContent กรุณาตรวจสอบสิทธิ์ใน Google AI Studio"
+
+    # ลองใช้โมเดลตามรายการที่ Google อนุญาตให้ใช้ได้จริง
+    last_error = ""
+    for model_name in active_models:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response and response.text:
-                response_text = response.text
-                break
-        except Exception:
+                return f"{response.text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+        except Exception as e:
+            last_error = str(e)
             continue
             
-    if response_text:
-        return f"{response_text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-    else:
-        return "ไม่สามารถเชื่อมต่อโมเดล Gemini ได้ กรุณาตรวจสอบสิทธิ์และสถานะของ API Key"
+    return f"❌ **ไม่สามารถเรียกใช้งานโมเดลได้:**\n`{last_error}`"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
