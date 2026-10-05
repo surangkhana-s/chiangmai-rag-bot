@@ -27,7 +27,36 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data & Batch Vector Search via Gemini API
+# Dynamic Model Helper Functions
+# --------------------------------------------------
+def get_chat_model():
+    """ค้นหาโมเดลที่รองรับ generateContent ใน API Key นี้แบบอัตโนมัติ"""
+    try:
+        models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        # เลือกโมเดลตระกูล flash ก่อน ถ้าไม่มีให้เลือกโมเดลแรกที่ใช้ได้
+        for m in models:
+            if 'flash' in m:
+                return m
+        return models[0] if models else "models/gemini-1.5-flash"
+    except Exception:
+        return "models/gemini-1.5-flash"
+
+def get_embed_model():
+    """ค้นหาโมเดล Embedding ที่ใช้ได้"""
+    try:
+        models = [
+            m.name for m in genai.list_models() 
+            if 'embedContent' in m.supported_generation_methods
+        ]
+        return models[0] if models else "models/text-embedding-004"
+    except Exception:
+        return "models/text-embedding-004"
+
+# --------------------------------------------------
+# 2. Load Data & Batch Vector Search
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -58,12 +87,13 @@ def load_rag_data():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
+    embed_model_name = get_embed_model()
     vectors = []
     batch_size = 50
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i+batch_size]
         try:
-            res = genai.embed_content(model="models/text-embedding-004", content=batch)
+            res = genai.embed_content(model=embed_model_name, content=batch)
             vectors.extend(res['embedding'])
         except Exception:
             for _ in batch:
@@ -78,7 +108,8 @@ doc_vectors, doc_chunks, doc_sources = load_rag_data()
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
     try:
-        res = genai.embed_content(model="models/text-embedding-004", content=query)
+        embed_model_name = get_embed_model()
+        res = genai.embed_content(model=embed_model_name, content=query)
         q_vec = np.array(res['embedding'], dtype='float32')
         
         norms = np.linalg.norm(doc_vectors, axis=1) * np.linalg.norm(q_vec)
@@ -110,8 +141,9 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
 
     try:
+        model_name = get_chat_model()
         model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash',
+            model_name=model_name,
             system_instruction=sys_instruction
         )
         response = model.generate_content(
@@ -123,7 +155,7 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
         return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
         
     except Exception as e:
-        return f"❌ **เกิดข้อผิดพลาด:** `{str(e)}`\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+        return f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `{str(e)}`\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
