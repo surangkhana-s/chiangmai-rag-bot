@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer
 # --------------------------------------------------
 st.set_page_config(
     page_title="ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่",
-    page_icon="🏔️",
+    page_icon="🏔️️",
     layout="centered"
 )
 
@@ -38,7 +38,6 @@ def load_rag_system():
     chunks = []
     sources = []
     
-    # อ่านไฟล์ทั้งหมดในโฟลเดอร์ data/
     data_files = glob.glob("data/*")
     
     for file_path in data_files:
@@ -64,7 +63,6 @@ def load_rag_system():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
-    # สร้าง FAISS Index ในหน่วยความจำ
     embeddings = embedder.encode(chunks, convert_to_numpy=True)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
@@ -97,22 +95,18 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
     valid_sources = [s for s in set(retrieved_sources) if s != "none"]
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
+
+    # กำหนด System Instruction บังคับกฎให้ AI อย่างเข้มงวด
+    sys_instruction = (
+        "คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ "
+        "ข้อบังคับเข้มงวด: ตอบเป็นภาษาไทยเท่านั้น ตอบสั้นกระชับตรงประเด็น "
+        "และตอบเฉพาะเนื้อหาคำตอบสุดท้ายเท่านั้น ห้ามทวนคำสั่ง ห้ามแสดงขั้นตอนการคิด "
+        "ห้ามวิเคราะห์กฎเกณฑ์ และห้ามแปลเป็นภาษาอังกฤษเด็ดขาด "
+        "ให้อ้างอิงเฉพาะข้อมูลใน Context ที่ให้มาเท่านั้น หาก Context ไม่มีข้อมูลที่ใช้ตอบคำถามได้ ให้ตอบคำว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
+    )
     
-    prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
+    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
 
-คำสั่งสำคัญที่ต้องปฏิบัติตามอย่างเคร่งครัด:
-1. ตอบเป็นภาษาไทยเท่านั้น
-2. ให้ตอบคำถามโดยอิงจากข้อมูลใน Context ที่กำหนดให้เท่านั้น ห้ามใช้ความรู้ภายนอก
-3. หากใน Context ไม่มีข้อมูลที่ใช้ตอบคำถามได้ ให้ตอบสั้นๆ ว่า "ไม่พบข้อมูลในเอกสารอ้างอิง"
-4. ห้ามแสดงขั้นตอนการคิด (Reasoning/Thinking) หรือสรุปข้อกฎเกณฑ์ออกมา ให้ตอบเฉพาะคำตอบสุดท้ายเท่านั้น
-
-Context ที่ค้นหาได้:
-{context_str}
-
-คำถาม: {query}
-คำตอบ:"""
-
-    # สอบถาม Google API โดยตรงว่า API Key นี้มีสิทธิ์ใช้โมเดลชื่ออะไรบ้าง
     try:
         active_models = [
             m.name for m in genai.list_models() 
@@ -124,15 +118,17 @@ Context ที่ค้นหาได้:
     if not active_models:
         return "❌ API Key นี้ไม่มีโมเดลที่รองรับ generateContent"
 
-    # ลองใช้โมเดลตามรายการที่ Google อนุญาตให้ใช้ได้จริง
     last_error = ""
     for model_name in active_models:
         try:
-            model = genai.GenerativeModel(model_name)
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                system_instruction=sys_instruction
+            )
             response = model.generate_content(
-                prompt,
+                user_prompt,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.0  # ปรับเป็น 0 เพื่อให้ตอบตรงตามคำสั่งเป๊ะๆ
+                    temperature=0.0
                 )
             )
             if response and response.text:
