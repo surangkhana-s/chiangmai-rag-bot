@@ -26,12 +26,11 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data (โหลดเนื้อหาเต็มไฟล์)
+# 2. Load Data
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
-    chunks = []
-    sources = []
+    files_data = []
     data_files = glob.glob("data/*")
     
     for file_path in data_files:
@@ -41,72 +40,64 @@ def load_rag_data():
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().strip()
                     if content:
-                        chunks.append(content)
-                        sources.append(filename)
+                        files_data.append({"filename": filename, "content": content})
             except Exception:
                 pass
         elif file_path.endswith('.csv'):
             try:
                 df = pd.read_csv(file_path)
-                chunks.append(df.to_string())
-                sources.append(filename)
+                files_data.append({"filename": filename, "content": df.to_string()})
             except Exception:
                 pass
 
-    if not chunks:
-        chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
-        sources = ["none"]
+    return files_data
 
-    return chunks, sources
-
-doc_chunks, doc_sources = load_rag_data()
+all_docs = load_rag_data()
 
 # --------------------------------------------------
-# 3. Smart Thai Retrieval Function (Ratio-based Threshold)
+# 3. Simple & Accurate Thai Retrieval
 # --------------------------------------------------
-def retrieve_documents(query, top_k=2):
-    if len(query) < 2:
-        return [], []
+def retrieve_documents(query):
+    query_clean = query.strip().lower()
+    matched_chunks = []
+    matched_sources = []
+
+    # รายชื่อสถานที่หลักๆ ในเชียงใหม่สำหรับ Match ตรง
+    for doc in all_docs:
+        content = doc["content"]
+        filename = doc["filename"]
         
-    search_grams = [query[i:i+2] for i in range(len(query)-1)]
-    total_grams = len(search_grams)
-    
-    scored_docs = []
-    for chunk, source in zip(doc_chunks, doc_sources):
-        matched_count = sum(1 for gram in search_grams if gram in chunk or gram in source)
-        ratio = matched_count / max(1, total_grams)
-        scored_docs.append((ratio, chunk, source))
+        # ตรวจสอบว่าคำถามมีคำที่ตรงกับเนื้อหาหรือชื่อไฟล์หรือไม่
+        # ตัดคำถามเป็นคำสั้นๆ 3 ตัวอักษร
+        keywords = [query_clean[i:i+3] for i in range(len(query_clean)-2)] if len(query_clean) >= 3 else [query_clean]
+        
+        match_count = sum(1 for kw in keywords if kw in content.lower() or kw in filename.lower())
+        
+        # ต้องมีคำตรงกันมากกว่า 30% ของคำถาม
+        if match_count / max(1, len(keywords)) >= 0.3:
+            matched_chunks.append(content)
+            matched_sources.append(filename)
 
-    # เรียงลำดับตามสัดส่วนความตรงกัน
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    
-    # 🎯 เกณฑ์วัดผล: ต้องตรงกันอย่างน้อย 25% ถึงจะถือว่ามีข้อมูล
-    best_ratio = scored_docs[0][0] if scored_docs else 0
-    if best_ratio < 0.25:
-        return [], []
-
-    retrieved_chunks = [doc[1] for doc in scored_docs[:top_k] if doc[0] >= 0.20]
-    retrieved_sources = [doc[2] for doc in scored_docs[:top_k] if doc[0] >= 0.20]
-    return retrieved_chunks, retrieved_sources
+    return matched_chunks, matched_sources
 
 # --------------------------------------------------
 # 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
+    # ถ้าไม่มีเอกสารที่เกี่ยวข้องเลย ตอบไม่พบข้อมูลทันที
     if not retrieved_chunks:
         return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
     context_str = "\n\n---\n\n".join(retrieved_chunks)
-    valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
-    sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
+    valid_sources = list(set(retrieved_sources))
+    sources_str = ", ".join(valid_sources)
 
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-โปรดตอบคำถามโดยอ้างอิงจาก Context ด้านล่างนี้เท่านั้น
+หน้าที่ของคุณคือตอบคำถามโดยอ้างอิงจาก Context ที่กำหนดให้เท่านั้น
 
-กฎการตอบ:
-1. ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
-2. หาก Context มีคำตอบ ให้ตอบเฉพาะสิ่งที่ถาม
-3. หากใน Context ไม่มีคำตอบสำหรับคำถาม ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
+กฎการทำงาน:
+1. หากคำถามมีคำตอบอยู่ใน Context ให้ตอบคำถามอย่างถูกต้อง สั้น กระชับ เป็นภาษาไทย
+2. หาก Context ไม่เกี่ยวข้องกับคำถาม หรือไม่มีข้อมูลตอบคำถามได้ ให้ตอบคำว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น ห้ามเดาหรือใช้ความรู้นอก Context เด็ดขาด
 
 Context:
 {context_str}
@@ -115,18 +106,19 @@ Context:
 """
 
     models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
-    last_err = ""
     for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             if response and response.text:
-                return f"{response.text.strip()}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-        except Exception as e:
-            last_err = str(e)
+                res_text = response.text.strip()
+                if "ไม่พบข้อมูล" in res_text:
+                    return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
+                return f"{res_text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+        except Exception:
             continue
 
-    return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
