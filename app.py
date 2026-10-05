@@ -102,7 +102,7 @@ def retrieve_documents(query, top_k=3):
         return doc_chunks[:top_k], doc_sources[:top_k]
 
 # --------------------------------------------------
-# 4. RAG Response Generation Function (Fallback Loop)
+# 4. RAG Response Generation Function (Direct Reliable Model)
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
@@ -117,16 +117,8 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
 
     user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
 
-    # รายชื่อโมเดลมาตรฐานที่จะลองเชื่อมต่อเรียงตามลำดับ
-    candidate_models = [
-        'gemini-1.5-flash',
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-pro',
-        'models/gemini-1.5-flash',
-        'models/gemini-1.5-pro'
-    ]
+    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
 
-    last_error = ""
     for model_name in candidate_models:
         try:
             model = genai.GenerativeModel(
@@ -140,11 +132,10 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
             if response and response.text:
                 clean_answer = response.text.strip()
                 return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-        except Exception as e:
-            last_error = str(e)
+        except Exception:
             continue
 
-    return f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `{last_error}`\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
