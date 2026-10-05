@@ -1,13 +1,10 @@
 import os
 import glob
 import json
-import re
-import pandas as pd
 import numpy as np
-import faiss
+import pandas as pd
 import streamlit as st
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
 
 # --------------------------------------------------
 # Page Configuration
@@ -22,7 +19,7 @@ st.title("🏔️ ผู้ช่วยตอบคำถามการท่�
 st.caption("ระบบตอบคำถามจากคลังเอกสารความรู้การท่องเที่ยวเชียงใหม่ ด้วยเทคโนโลยี RAG")
 
 # --------------------------------------------------
-# 1. API Key & Model Setup
+# 1. API Key Setup
 # --------------------------------------------------
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("❌ ไม่พบ GEMINI_API_KEY ใน Streamlit Secrets กรุณาตั้งค่าใน Streamlit Cloud")
@@ -31,15 +28,12 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data from 'data' Folder & Build FAISS Index
+# 2. Load Data & Create Vector Search via Gemini API (Save RAM)
 # --------------------------------------------------
 @st.cache_resource
-def load_rag_system():
-    embedder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
-    
+def load_rag_data():
     chunks = []
     sources = []
-    
     data_files = glob.glob("data/*")
     
     for file_path in data_files:
@@ -65,33 +59,42 @@ def load_rag_system():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
-    embeddings = embedder.encode(chunks, convert_to_numpy=True)
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(np.array(embeddings).astype('float32'))
-    
-    return embedder, index, chunks, sources
+    # ฝัง Vector ผ่าน Gemini Embedding API (ประหยัดแรม ไม่ต้องโหลดไฟล์โมเดลลงเซิร์ฟเวอร์)
+    vectors = []
+    for chunk in chunks:
+        try:
+            res = genai.embed_content(model="models/text-embedding-004", content=chunk)
+            vectors.append(res['embedding'])
+        except Exception:
+            vectors.append([0.0]*768)
+            
+    return np.array(vectors, dtype='float32'), chunks, sources
 
-embedder, faiss_index, doc_chunks, doc_sources = load_rag_system()
+doc_vectors, doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Retrieval Function
+# 3. Retrieval Function (Cosine Similarity via Numpy)
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
-    query_vector = embedder.encode([query], convert_to_numpy=True).astype('float32')
-    distances, indices = faiss_index.search(query_vector, min(top_k, len(doc_chunks)))
-    
-    retrieved_chunks = []
-    retrieved_sources = []
-    for idx in indices[0]:
-        if 0 <= idx < len(doc_chunks):
-            retrieved_chunks.append(doc_chunks[idx])
-            retrieved_sources.append(doc_sources[idx])
-            
-    return retrieved_chunks, retrieved_sources
+    try:
+        res = genai.embed_content(model="models/text-embedding-004", content=query)
+        q_vec = np.array(res['embedding'], dtype='float32')
+        
+        # คำนวณ Cosine Similarity ด้วย Numpy
+        norms = np.linalg.norm(doc_vectors, axis=1) * np.linalg.norm(q_vec)
+        norms[norms == 0] = 1e-10
+        scores = np.dot(doc_vectors, q_vec) / norms
+        
+        top_indices = np.argsort(scores)[::-1][:top_k]
+        
+        retrieved_chunks = [doc_chunks[i] for i in top_indices]
+        retrieved_sources = [doc_sources[i] for i in top_indices]
+        return retrieved_chunks, retrieved_sources
+    except Exception:
+        return doc_chunks[:top_k], doc_sources[:top_k]
 
 # --------------------------------------------------
-# 4. RAG Response Generation Function (JSON Mode + Python Cleanup)
+# 4. RAG Response Generation Function (Strict JSON Output)
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
@@ -100,73 +103,26 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
 
     sys_instruction = (
         "คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ "
-        "ให้ตอบคำถามโดยใช้อ้างอิงจาก Context ที่กำหนดให้เท่านั้น "
+        "ให้ตอบคำถามโดยอ้างอิงจาก Context ที่กำหนดให้เท่านั้น "
         "หากไม่มีข้อมูลใน Context ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
     )
 
-    user_prompt = f"""Context:
-{context_str}
-
-คำถาม: {query}
-
-กรุณาตอบคำถามเป็นรูปแบบ JSON เท่านั้น ดังตัวอย่าง:
-{{"answer": "คำตอบภาษาไทยสั้นๆ ตรงประเด็น"}}
-"""
+    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}\n\nตอบในรูปแบบ JSON สั้นๆ ดังนี้: {{\"answer\": \"คำตอบภาษาไทยตรงประเด็น\"}}"
 
     try:
-        active_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-    except Exception as e:
-        return f"❌ **เกิดข้อผิดพลาดจาก API Key:**\n`{str(e)}`"
-
-    if not active_models:
-        return "❌ API Key นี้ไม่มีโมเดลที่รองรับ generateContent"
-
-    last_error = ""
-    for model_name in active_models:
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=sys_instruction
+        model = genai.GenerativeModel(model_name='gemini-1.5-flash', system_instruction=sys_instruction)
+        response = model.generate_content(
+            user_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.0,
+                response_mime_type="application/json"
             )
-            
-            # บังคับส่งออกเป็น JSON
-            try:
-                response = model.generate_content(
-                    user_prompt,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.0,
-                        response_mime_type="application/json"
-                    )
-                )
-                data = json.loads(response.text)
-                answer_text = data.get("answer", response.text)
-            except Exception:
-                # Fallback สำหรับโมเดลที่ตัดคำด้วย Python
-                response = model.generate_content(
-                    user_prompt,
-                    generation_config=genai.types.GenerationConfig(temperature=0.0)
-                )
-                raw_text = response.text.strip()
-                if "{" in raw_text and "}" in raw_text:
-                    match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-                    data = json.loads(match.group(0)) if match else {}
-                    answer_text = data.get("answer", raw_text)
-                else:
-                    lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
-                    answer_text = lines[-1] if lines else raw_text
-
-            # ทำความสะอาดสตริงครั้งสุดท้าย
-            clean_answer = str(answer_text).replace('"', '').replace("'", "").strip()
-            return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-
-        except Exception as e:
-            last_error = str(e)
-            continue
-            
-    return f"❌ **ไม่สามารถเรียกใช้งานโมเดลได้:**\n`{last_error}`"
+        )
+        data = json.loads(response.text)
+        clean_answer = str(data.get("answer", response.text)).strip()
+        return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    except Exception:
+        return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
