@@ -99,17 +99,18 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
     
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-คำสั่งสำคัญ:
-1. ให้ตอบคำถามโดยอิงจากข้อมูลใน Context ที่กำหนดให้เท่านั้น
-2. ห้ามใช้ความรู้ภายนอกหรือคาดเดาคำตอบเองเด็ดขาด
-3. หากใน Context ไม่มีข้อมูลที่สามารถตอบคำถามได้ ให้ตอบอย่างสุภาพว่า "ไม่พบข้อมูลในเอกสารอ้างอิง"
-4. ท้ายคำตอบ ต้องระบุชื่อไฟล์เอกสารอ้างอิงที่ใช้ในการตอบทุกครั้ง
+
+คำสั่งสำคัญที่ต้องปฏิบัติตามอย่างเคร่งครัด:
+1. ตอบเป็นภาษาไทยเท่านั้น
+2. ให้ตอบคำถามโดยอิงจากข้อมูลใน Context ที่กำหนดให้เท่านั้น ห้ามใช้ความรู้ภายนอก
+3. หากใน Context ไม่มีข้อมูลที่ใช้ตอบคำถามได้ ให้ตอบสั้นๆ ว่า "ไม่พบข้อมูลในเอกสารอ้างอิง"
+4. ห้ามแสดงขั้นตอนการคิด (Reasoning/Thinking) หรือสรุปข้อกฎเกณฑ์ออกมา ให้ตอบเฉพาะคำตอบสุดท้ายเท่านั้น
 
 Context ที่ค้นหาได้:
 {context_str}
 
 คำถาม: {query}
-"""
+คำตอบ:"""
 
     # สอบถาม Google API โดยตรงว่า API Key นี้มีสิทธิ์ใช้โมเดลชื่ออะไรบ้าง
     try:
@@ -118,19 +119,24 @@ Context ที่ค้นหาได้:
             if 'generateContent' in m.supported_generation_methods
         ]
     except Exception as e:
-        return f"❌ **เกิดข้อผิดพลาดจาก API Key:**\n`{str(e)}`\n\n*แนะนำ: ลองสร้าง API Key ใหม่ที่ https://aistudio.google.com/ แล้วนำมาใส่ใน Streamlit Secrets*"
+        return f"❌ **เกิดข้อผิดพลาดจาก API Key:**\n`{str(e)}`"
 
     if not active_models:
-        return "❌ API Key นี้ไม่มีโมเดลที่รองรับ generateContent กรุณาตรวจสอบสิทธิ์ใน Google AI Studio"
+        return "❌ API Key นี้ไม่มีโมเดลที่รองรับ generateContent"
 
     # ลองใช้โมเดลตามรายการที่ Google อนุญาตให้ใช้ได้จริง
     last_error = ""
     for model_name in active_models:
         try:
             model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt)
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.0  # ปรับเป็น 0 เพื่อให้ตอบตรงตามคำสั่งเป๊ะๆ
+                )
+            )
             if response and response.text:
-                return f"{response.text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+                return f"{response.text.strip()}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
         except Exception as e:
             last_error = str(e)
             continue
