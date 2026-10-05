@@ -1,6 +1,5 @@
 import os
 import glob
-import json
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -28,7 +27,7 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data & Batch Vector Search via Gemini API (Fast Load)
+# 2. Load Data & Batch Vector Search via Gemini API
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -59,7 +58,6 @@ def load_rag_data():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
-    # Batch Embedding ส่งประมวลผลชุดละ 50 รายการเพื่อความเร็วสูงสุด
     vectors = []
     batch_size = 50
     for i in range(0, len(chunks), batch_size):
@@ -76,7 +74,7 @@ def load_rag_data():
 doc_vectors, doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Retrieval Function (Cosine Similarity via Numpy)
+# 3. Retrieval Function
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
     try:
@@ -96,7 +94,7 @@ def retrieve_documents(query, top_k=3):
         return doc_chunks[:top_k], doc_sources[:top_k]
 
 # --------------------------------------------------
-# 4. RAG Response Generation Function (Strict JSON Output)
+# 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
@@ -105,26 +103,27 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
 
     sys_instruction = (
         "คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ "
-        "ให้ตอบคำถามโดยอ้างอิงจาก Context ที่กำหนดให้เท่านั้น "
-        "หากไม่มีข้อมูลใน Context ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
+        "ข้อบังคับ: ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น ห้ามแสดงขั้นตอนการคิด "
+        "ให้อ้างอิงข้อมูลจาก Context ที่ได้รับเท่านั้น หากใน Context ไม่มีข้อมูลที่ตรงกับคำถาม ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
     )
 
-    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}\n\nตอบในรูปแบบ JSON สั้นๆ ดังนี้: {{\"answer\": \"คำตอบภาษาไทยตรงประเด็น\"}}"
+    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
 
     try:
-        model = genai.GenerativeModel(model_name='gemini-1.5-flash', system_instruction=sys_instruction)
+        model = genai.GenerativeModel(
+            model_name='gemini-1.5-flash',
+            system_instruction=sys_instruction
+        )
         response = model.generate_content(
             user_prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.0,
-                response_mime_type="application/json"
-            )
+            generation_config=genai.types.GenerationConfig(temperature=0.2)
         )
-        data = json.loads(response.text)
-        clean_answer = str(data.get("answer", response.text)).strip()
+        
+        clean_answer = response.text.strip()
         return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-    except Exception:
-        return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+        
+    except Exception as e:
+        return f"❌ **เกิดข้อผิดพลาด:** `{str(e)}`\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
