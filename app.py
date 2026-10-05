@@ -3,6 +3,8 @@ import glob
 import pandas as pd
 import streamlit as st
 import google.generativeai as genai
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 # --------------------------------------------------
 # Page Configuration
@@ -26,11 +28,12 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data
+# 2. Load Data & Prepare Vectorizer
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
-    files_data = []
+    chunks = []
+    sources = []
     data_files = glob.glob("data/*")
     
     for file_path in data_files:
@@ -40,64 +43,69 @@ def load_rag_data():
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read().strip()
                     if content:
-                        files_data.append({"filename": filename, "content": content})
+                        chunks.append(content)
+                        sources.append(filename)
             except Exception:
                 pass
         elif file_path.endswith('.csv'):
             try:
                 df = pd.read_csv(file_path)
-                files_data.append({"filename": filename, "content": df.to_string()})
+                chunks.append(df.to_string())
+                sources.append(filename)
             except Exception:
                 pass
 
-    return files_data
+    if not chunks:
+        chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
+        sources = ["none"]
 
-all_docs = load_rag_data()
+    # สร้าง TF-IDF Vectorizer สำหรับภาษาไทย (ใช้ char_wb analyzer ช่วยตัดคำภาษาไทยได้แม่นยำ)
+    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(2, 4))
+    tfidf_matrix = vectorizer.fit_transform(chunks)
+
+    return chunks, sources, vectorizer, tfidf_matrix
+
+doc_chunks, doc_sources, vectorizer, tfidf_matrix = load_rag_data()
 
 # --------------------------------------------------
-# 3. Simple & Accurate Thai Retrieval
+# 3. TF-IDF Retrieval Function
 # --------------------------------------------------
-def retrieve_documents(query):
-    query_clean = query.strip().lower()
-    matched_chunks = []
-    matched_sources = []
-
-    # รายชื่อสถานที่หลักๆ ในเชียงใหม่สำหรับ Match ตรง
-    for doc in all_docs:
-        content = doc["content"]
-        filename = doc["filename"]
-        
-        # ตรวจสอบว่าคำถามมีคำที่ตรงกับเนื้อหาหรือชื่อไฟล์หรือไม่
-        # ตัดคำถามเป็นคำสั้นๆ 3 ตัวอักษร
-        keywords = [query_clean[i:i+3] for i in range(len(query_clean)-2)] if len(query_clean) >= 3 else [query_clean]
-        
-        match_count = sum(1 for kw in keywords if kw in content.lower() or kw in filename.lower())
-        
-        # ต้องมีคำตรงกันมากกว่า 30% ของคำถาม
-        if match_count / max(1, len(keywords)) >= 0.3:
-            matched_chunks.append(content)
-            matched_sources.append(filename)
-
-    return matched_chunks, matched_sources
+def retrieve_documents(query, top_k=2, similarity_threshold=0.12):
+    query_vec = vectorizer.transform([query])
+    cosine_similarities = cosine_similarity(query_vec, tfidf_matrix).flatten()
+    
+    # ดึงดรรชนีที่มีค่าความคล้ายคลึงสูงสุด
+    top_indices = cosine_similarities.argsort()[::-1]
+    
+    retrieved_chunks = []
+    retrieved_sources = []
+    
+    for idx in top_indices[:top_k]:
+        # เช็กเกณฑ์คะแนนความเหมือน (Threshold)
+        if cosine_similarities[idx] >= similarity_threshold:
+            retrieved_chunks.append(doc_chunks[idx])
+            retrieved_sources.append(doc_sources[idx])
+            
+    return retrieved_chunks, retrieved_sources
 
 # --------------------------------------------------
 # 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
-    # ถ้าไม่มีเอกสารที่เกี่ยวข้องเลย ตอบไม่พบข้อมูลทันที
     if not retrieved_chunks:
         return "ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** ไม่พบเอกสารอ้างอิง"
 
     context_str = "\n\n---\n\n".join(retrieved_chunks)
-    valid_sources = list(set(retrieved_sources))
-    sources_str = ", ".join(valid_sources)
+    valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
+    sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-หน้าที่ของคุณคือตอบคำถามโดยอ้างอิงจาก Context ที่กำหนดให้เท่านั้น
+โปรดตอบคำถามโดยอ้างอิงข้อมูลจาก Context ด้านล่างนี้เท่านั้น
 
-กฎการทำงาน:
-1. หากคำถามมีคำตอบอยู่ใน Context ให้ตอบคำถามอย่างถูกต้อง สั้น กระชับ เป็นภาษาไทย
-2. หาก Context ไม่เกี่ยวข้องกับคำถาม หรือไม่มีข้อมูลตอบคำถามได้ ให้ตอบคำว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น ห้ามเดาหรือใช้ความรู้นอก Context เด็ดขาด
+กฎการตอบ:
+1. ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น
+2. หาก Context มีข้อมูลตอบ ให้สรุปเนื้อหาตอบตรงๆ
+3. หากใน Context ไม่มีคำตอบสำหรับคำถาม ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง' เท่านั้น
 
 Context:
 {context_str}
