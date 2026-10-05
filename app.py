@@ -1,5 +1,6 @@
 import os
 import glob
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -66,43 +67,53 @@ def load_rag_data():
             res = genai.embed_content(model="models/text-embedding-004", content=batch)
             vectors.extend(res['embedding'])
         except Exception:
-            try:
-                res = genai.embed_content(model="text-embedding-004", content=batch)
-                vectors.extend(res['embedding'])
-            except Exception:
-                for _ in batch:
-                    vectors.append([0.0]*768)
+            for _ in batch:
+                vectors.append([0.0]*768)
             
     return np.array(vectors, dtype='float32'), chunks, sources
 
 doc_vectors, doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Retrieval Function
+# 3. Hybrid Retrieval Function (Vector + Keyword Search)
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
+    retrieved_indices = []
+    
+    # 1. ลองค้นหาด้วย Vector Search ก่อน
     try:
-        try:
-            res = genai.embed_content(model="models/text-embedding-004", content=query)
-        except Exception:
-            res = genai.embed_content(model="text-embedding-004", content=query)
-
+        res = genai.embed_content(model="models/text-embedding-004", content=query)
         q_vec = np.array(res['embedding'], dtype='float32')
         
         norms = np.linalg.norm(doc_vectors, axis=1) * np.linalg.norm(q_vec)
         norms[norms == 0] = 1e-10
         scores = np.dot(doc_vectors, q_vec) / norms
         
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        
-        retrieved_chunks = [doc_chunks[i] for i in top_indices]
-        retrieved_sources = [doc_sources[i] for i in top_indices]
-        return retrieved_chunks, retrieved_sources
+        # เลือกเอาเฉพาะรายการที่มีคะแนนสูงกว่า 0.1
+        top_indices = np.argsort(scores)[::-1]
+        if scores[top_indices[0]] > 0.1:
+            retrieved_indices = list(top_indices[:top_k])
     except Exception:
-        return doc_chunks[:top_k], doc_sources[:top_k]
+        pass
+
+    # 2. ค้นหาด้วย Keyword Matching (สำรองเมื่อ Vector ไม่ทำงาน หรือผลลัพธ์ไม่ตรง)
+    if not retrieved_indices:
+        query_words = [w for w in re.split(r'\s+', query) if len(w) > 1]
+        kw_scores = []
+        for chunk in doc_chunks:
+            score = sum(chunk.count(word) for word in query_words)
+            kw_scores.append(score)
+        
+        kw_scores = np.array(kw_scores)
+        top_indices = np.argsort(kw_scores)[::-1]
+        retrieved_indices = list(top_indices[:top_k])
+
+    retrieved_chunks = [doc_chunks[i] for i in retrieved_indices]
+    retrieved_sources = [doc_sources[i] for i in retrieved_indices]
+    return retrieved_chunks, retrieved_sources
 
 # --------------------------------------------------
-# 4. RAG Response Generation Function (Direct Reliable Model)
+# 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
