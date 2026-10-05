@@ -113,18 +113,17 @@ Context ที่ค้นหาได้:
 """
 # ค้นหาชื่อโมเดลที่รองรับใช้งานได้จริงให้อัตโนมัติ
 try:
-    available_models = [
-        m.name for m in genai.list_models() 
-        if 'generateContent' in m.supported_generation_methods
-    ]
-    # ดึงโมเดล Flash หรือ Pro ตัวแรกที่เจอในระบบ
-    target_model = next((m for m in available_models if 'flash' in m or 'pro' in m), available_models[0])
-    model = genai.GenerativeModel(target_model)
-except Exception:
-    model = genai.GenerativeModel('gemini-1.5-flash')
+        available_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        target_model = next((m for m in available_models if 'flash' in m or 'pro' in m), available_models[0])
+        model = genai.GenerativeModel(target_model)
+    except Exception:
+        model = genai.GenerativeModel('gemini-1.5-flash')
 
-response = model.generate_content(prompt)
-return response.text
+    response = model.generate_content(prompt)
+    return response.text
 
 
 # -----------------------------------------------------------------------------
