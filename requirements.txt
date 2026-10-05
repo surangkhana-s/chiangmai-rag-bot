@@ -1,5 +1,4 @@
 streamlit
-sentence-transformers
-faiss-cpu
 google-generativeai
-torchvision
+pandas
+numpy
