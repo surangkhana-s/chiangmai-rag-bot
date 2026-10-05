@@ -112,7 +112,7 @@ Context ที่ค้นหาได้:
 คำถาม: {query}
 """
 # ค้นหาชื่อโมเดลที่รองรับใช้งานได้จริงให้อัตโนมัติ
-try:
+    try:
         available_models = [
             m.name for m in genai.list_models() 
             if 'generateContent' in m.supported_generation_methods
