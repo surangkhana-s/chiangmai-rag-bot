@@ -26,7 +26,7 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data (โหลดเนื้อหาเต็มทั้งไฟล์ ป้องกันข้อมูลตกหล่น)
+# 2. Load Data
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -66,7 +66,6 @@ doc_chunks, doc_sources = load_rag_data()
 # --------------------------------------------------
 def retrieve_documents(query, top_k=2):
     scores = []
-    # ตัดคำแบบ N-gram 2 ตัวอักษรเพื่อรองรับภาษาไทย
     search_grams = [query[i:i+2] for i in range(len(query)-1)] if len(query) >= 2 else [query]
     
     for chunk, source in zip(doc_chunks, doc_sources):
@@ -80,13 +79,10 @@ def retrieve_documents(query, top_k=2):
 
     indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     
-    # ถ้าไม่มีคำไหนตรงเลยสักนิดเดียว ให้คืนค่าว่าง
     if not indexed_scores or indexed_scores[0][1] == 0:
         return [], []
 
-    # ดึงไฟล์ที่คะแนนสูงสุด top_k อันดับแรก
     top_indices = [idx for idx, sc in indexed_scores[:top_k] if sc > 0]
-
     retrieved_chunks = [doc_chunks[i] for i in top_indices]
     retrieved_sources = [doc_sources[i] for i in top_indices]
     return retrieved_chunks, retrieved_sources
@@ -103,12 +99,7 @@ def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
-โปรดตอบคำถามโดยใช้ข้อมูลจาก Context ด้านล่างนี้เป็นหลัก
-
-กฎการตอบ:
-1. ตอบคำถามให้ตรงประเด็น สั้น กระชับ เป็นภาษาไทย
-2. หากใน Context มีข้อมูล ให้นำมาตอบทันที
-3. หากใน Context ไม่มีข้อมูลเกี่ยวกับคำถามนี้จริงๆ ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
+โปรดตอบคำถามโดยสรุปจากข้อมูล Context ด้านล่างนี้เป็นภาษาไทย
 
 Context:
 {context_str}
@@ -116,8 +107,8 @@ Context:
 คำถาม: {query}
 """
 
-    candidate_models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
-    for model_name in candidate_models:
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
+    for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
@@ -126,7 +117,8 @@ Context:
         except Exception:
             continue
 
-    return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+    # 🛡️ Fallback ไม้ตาย: แสดงเนื้อหาจาก Context ตรงๆ เมื่อ API ไม่ตอบสนอง
+    return f"**ข้อมูลจากคลังเอกสาร:**\n{context_str}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
 
 # --------------------------------------------------
 # 5. Streamlit Chat Interface
