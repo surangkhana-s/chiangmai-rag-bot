@@ -1,33 +1,6 @@
 import os
 import glob
 import re
-import numpy as np
-import pandas as pd
-import streamlit as st
-import google.generativeai as genai
-
-# --------------------------------------------------
-# Page Configuration
-# --------------------------------------------------
-st.set_page_config(
-    page_title="ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่",
-    page_icon="🏔️",
-    layout="centered"
-)
-
-st.title("🏔️ ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ (RAG Chatbot)")
-st.caption("ระบบตอบคำถามจากคลังเอกสารความรู้การท่องเที่ยวเชียงใหม่ ด้วยเทคโนโลยี RAG")
-
-# --------------------------------------------------
-# 1. API Key Setup
-# --------------------------------------------------
-if "GEMINI_API_KEY" not in st.secrets:
-    st.error("❌ ไม่พบ GEMINI_API_KEY ใน Streamlit Secrets กรุณาตั้งค่าใน Streamlit Cloud")
-    st.stop()
-import os
-import glob
-import re
-import numpy as np
 import pandas as pd
 import streamlit as st
 import google.generativeai as genai
@@ -54,7 +27,7 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Load Data & Create Vector Search
+# 2. Load Data
 # --------------------------------------------------
 @st.cache_resource
 def load_rag_data():
@@ -65,12 +38,15 @@ def load_rag_data():
     for file_path in data_files:
         filename = os.path.basename(file_path)
         if file_path.endswith('.txt') or file_path.endswith('.md'):
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-                paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
-                for p in paragraphs:
-                    chunks.append(p)
-                    sources.append(filename)
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+                    paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
+                    for p in paragraphs:
+                        chunks.append(p)
+                        sources.append(filename)
+            except Exception:
+                pass
         elif file_path.endswith('.csv'):
             try:
                 df = pd.read_csv(file_path)
@@ -85,49 +61,29 @@ def load_rag_data():
         chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
         sources = ["none"]
 
-    vectors = []
-    batch_size = 50
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
-        try:
-            res = genai.embed_content(model="models/text-embedding-004", content=batch)
-            vectors.extend(res['embedding'])
-        except Exception:
-            for _ in batch:
-                vectors.append([0.0]*768)
-            
-    return np.array(vectors, dtype='float32'), chunks, sources
+    return chunks, sources
 
-doc_vectors, doc_chunks, doc_sources = load_rag_data()
+doc_chunks, doc_sources = load_rag_data()
 
 # --------------------------------------------------
-# 3. Fail-Safe Smart Retrieval Function (Keyword + Vector)
+# 3. Retrieval Function
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
-    scores = np.zeros(len(doc_chunks))
-    
-    # 1. Keyword Score (สแกนหาข้อความตรง ป้องกัน API ล้ม)
     clean_query = re.sub(r'[^\w\s]', '', query)
-    search_terms = [clean_query[i:i+3] for i in range(0, len(clean_query)-2)] + [clean_query]
-    
-    for i, chunk in enumerate(doc_chunks):
-        for term in search_terms:
-            if len(term) > 1 and term in chunk:
-                scores[i] += 10.0
-                
-    # 2. Vector Search Score (ถ้า API ปรกติจะนำมาบวกเพิ่ม)
-    try:
-        res = genai.embed_content(model="models/text-embedding-004", content=query)
-        q_vec = np.array(res['embedding'], dtype='float32')
-        if np.linalg.norm(q_vec) > 0:
-            norms = np.linalg.norm(doc_vectors, axis=1) * np.linalg.norm(q_vec)
-            norms[norms == 0] = 1e-10
-            v_scores = np.dot(doc_vectors, q_vec) / norms
-            scores += v_scores * 5.0
-    except Exception:
-        pass
+    words = [w for w in clean_query.split() if len(w) > 1]
+    if not words:
+        words = [query]
 
-    top_indices = np.argsort(scores)[::-1][:top_k]
+    scores = []
+    for chunk in doc_chunks:
+        score = sum(chunk.count(w) for w in words)
+        if query in chunk:
+            score += 10
+        scores.append(score)
+
+    indexed_scores = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+    top_indices = [idx for idx, sc in indexed_scores[:top_k]]
+
     retrieved_chunks = [doc_chunks[i] for i in top_indices]
     retrieved_sources = [doc_sources[i] for i in top_indices]
     return retrieved_chunks, retrieved_sources
@@ -137,32 +93,26 @@ def retrieve_documents(query, top_k=3):
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
-    valid_sources = [s for s in set(retrieved_sources) if s != "none"]
+    valid_sources = list(set([s for s in retrieved_sources if s != "none"]))
     sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
 
-    sys_instruction = (
-        "คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ "
-        "ข้อบังคับ: ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น ห้ามแสดงขั้นตอนการคิด "
-        "ให้อ้างอิงข้อมูลจาก Context ที่ได้รับเท่านั้น หากใน Context ไม่มีข้อมูลที่ตรงกับคำถาม ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
-    )
+    prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ 
+ให้อ้างอิงข้อมูลจาก Context ด้านล่างนี้เท่านั้นในการตอบคำถาม
+ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น ห้ามแสดงขั้นตอนการคิด หากใน Context ไม่มีข้อมูลให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'
 
-    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
+Context:
+{context_str}
+
+คำถาม: {query}
+"""
 
     candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
-
     for model_name in candidate_models:
         try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=sys_instruction
-            )
-            response = model.generate_content(
-                user_prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.2)
-            )
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
             if response and response.text:
-                clean_answer = response.text.strip()
-                return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
+                return f"{response.text.strip()}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
         except Exception:
             continue
 
@@ -178,158 +128,13 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if user_query := st.chat_input("พิมพ์คำถามเกี่ยวกับการท่องเที่ยวเชียงใหม่ที่นี่..."):
+if user_query := st.chat_input("พิมพ์คำถามเกี่ยวกับการท่องเที่ยวเชียงใหม่ที่นี่...", key="main_chat_input"):
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
 
     with st.chat_message("assistant"):
-        with st.spinner("กำลังค้นหาข้อมูลและประมวลผลคำตอบ..."):
-            retrieved_chunks, retrieved_sources = retrieve_documents(user_query)
-            answer = generate_rag_response(user_query, retrieved_chunks, retrieved_sources)
-            st.markdown(answer)
-            
-    st.session_state.messages.append({"role": "assistant", "content": answer})
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-
-# --------------------------------------------------
-# 2. Load Data & Batch Vector Search
-# --------------------------------------------------
-@st.cache_resource
-def load_rag_data():
-    chunks = []
-    sources = []
-    data_files = glob.glob("data/*")
-    
-    for file_path in data_files:
-        filename = os.path.basename(file_path)
-        if file_path.endswith('.txt') or file_path.endswith('.md'):
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-                paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
-                for p in paragraphs:
-                    chunks.append(p)
-                    sources.append(filename)
-        elif file_path.endswith('.csv'):
-            try:
-                df = pd.read_csv(file_path)
-                for _, row in df.iterrows():
-                    text = " ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
-                    chunks.append(text)
-                    sources.append(filename)
-            except Exception:
-                pass
-
-    if not chunks:
-        chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
-        sources = ["none"]
-
-    vectors = []
-    batch_size = 50
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
-        try:
-            res = genai.embed_content(model="models/text-embedding-004", content=batch)
-            vectors.extend(res['embedding'])
-        except Exception:
-            for _ in batch:
-                vectors.append([0.0]*768)
-            
-    return np.array(vectors, dtype='float32'), chunks, sources
-
-doc_vectors, doc_chunks, doc_sources = load_rag_data()
-
-# --------------------------------------------------
-# 3. Hybrid Retrieval Function (Vector + Keyword Search)
-# --------------------------------------------------
-def retrieve_documents(query, top_k=3):
-    retrieved_indices = []
-    
-    # 1. ลองค้นหาด้วย Vector Search ก่อน
-    try:
-        res = genai.embed_content(model="models/text-embedding-004", content=query)
-        q_vec = np.array(res['embedding'], dtype='float32')
-        
-        norms = np.linalg.norm(doc_vectors, axis=1) * np.linalg.norm(q_vec)
-        norms[norms == 0] = 1e-10
-        scores = np.dot(doc_vectors, q_vec) / norms
-        
-        # เลือกเอาเฉพาะรายการที่มีคะแนนสูงกว่า 0.1
-        top_indices = np.argsort(scores)[::-1]
-        if scores[top_indices[0]] > 0.1:
-            retrieved_indices = list(top_indices[:top_k])
-    except Exception:
-        pass
-
-    # 2. ค้นหาด้วย Keyword Matching (สำรองเมื่อ Vector ไม่ทำงาน หรือผลลัพธ์ไม่ตรง)
-    if not retrieved_indices:
-        query_words = [w for w in re.split(r'\s+', query) if len(w) > 1]
-        kw_scores = []
-        for chunk in doc_chunks:
-            score = sum(chunk.count(word) for word in query_words)
-            kw_scores.append(score)
-        
-        kw_scores = np.array(kw_scores)
-        top_indices = np.argsort(kw_scores)[::-1]
-        retrieved_indices = list(top_indices[:top_k])
-
-    retrieved_chunks = [doc_chunks[i] for i in retrieved_indices]
-    retrieved_sources = [doc_sources[i] for i in retrieved_indices]
-    return retrieved_chunks, retrieved_sources
-
-# --------------------------------------------------
-# 4. RAG Response Generation Function
-# --------------------------------------------------
-def generate_rag_response(query, retrieved_chunks, retrieved_sources):
-    context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
-    valid_sources = [s for s in set(retrieved_sources) if s != "none"]
-    sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
-
-    sys_instruction = (
-        "คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่ "
-        "ข้อบังคับ: ตอบเป็นภาษาไทย สั้น กระชับ ตรงประเด็น ห้ามแสดงขั้นตอนการคิด "
-        "ให้อ้างอิงข้อมูลจาก Context ที่ได้รับเท่านั้น หากใน Context ไม่มีข้อมูลที่ตรงกับคำถาม ให้ตอบว่า 'ไม่พบข้อมูลในเอกสารอ้างอิง'"
-    )
-
-    user_prompt = f"Context:\n{context_str}\n\nคำถาม: {query}"
-
-    candidate_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash']
-
-    for model_name in candidate_models:
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                system_instruction=sys_instruction
-            )
-            response = model.generate_content(
-                user_prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.2)
-            )
-            if response and response.text:
-                clean_answer = response.text.strip()
-                return f"{clean_answer}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-        except Exception:
-            continue
-
-    return f"ไม่พบข้อมูลในเอกสารอ้างอิง\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
-
-# --------------------------------------------------
-# 5. Streamlit Chat Interface
-# --------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if user_query := st.chat_input("พิมพ์คำถามเกี่ยวกับการท่องเที่ยวเชียงใหม่ที่นี่..."):
-    st.session_state.messages.append({"role": "user", "content": user_query})
-    with st.chat_message("user"):
-        st.markdown(user_query)
-
-    with st.chat_message("assistant"):
-        with st.spinner("กำลังค้นหาข้อมูลและประมวลผลคำตอบ..."):
+        with st.spinner("กำลังประมวลผลคำตอบ..."):
             retrieved_chunks, retrieved_sources = retrieve_documents(user_query)
             answer = generate_rag_response(user_query, retrieved_chunks, retrieved_sources)
             st.markdown(answer)
