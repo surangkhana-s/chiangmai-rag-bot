@@ -1,4 +1,8 @@
 import os
+import glob
+import pandas as pd
+import numpy as np
+import faiss
 import streamlit as st
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
@@ -25,27 +29,74 @@ if "GEMINI_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # --------------------------------------------------
-# 2. Document Loading, Chunking & Embedding System
+# 2. Load Data from 'data' Folder & Build FAISS Index
 # --------------------------------------------------
 @st.cache_resource
-def load_embedding_model():
-    return SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+def load_rag_system():
+    embedder = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')
+    
+    chunks = []
+    sources = []
+    
+    # อ่านไฟล์ทั้งหมดในโฟลเดอร์ data/
+    data_files = glob.glob("data/*")
+    
+    for file_path in data_files:
+        filename = os.path.basename(file_path)
+        if file_path.endswith('.txt') or file_path.endswith('.md'):
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+                paragraphs = [p.strip() for p in content.split('\n\n') if len(p.strip()) > 5]
+                for p in paragraphs:
+                    chunks.append(p)
+                    sources.append(filename)
+        elif file_path.endswith('.csv'):
+            try:
+                df = pd.read_csv(file_path)
+                for _, row in df.iterrows():
+                    text = " ".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
+                    chunks.append(text)
+                    sources.append(filename)
+            except Exception:
+                pass
 
-embedding_model = load_embedding_model()
+    if not chunks:
+        chunks = ["ไม่มีข้อมูลในคลังเอกสาร"]
+        sources = ["none"]
+
+    # สร้าง FAISS Index ในหน่วยความจำ
+    embeddings = embedder.encode(chunks, convert_to_numpy=True)
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(np.array(embeddings).astype('float32'))
+    
+    return embedder, index, chunks, sources
+
+embedder, faiss_index, doc_chunks, doc_sources = load_rag_system()
 
 # --------------------------------------------------
-# 3. Retrieval Function (ปรับใช้ตามฟังก์ชันค้นหาของคุณ)
+# 3. Retrieval Function (ค้นหาเอกสารผ่าน FAISS)
 # --------------------------------------------------
 def retrieve_documents(query, top_k=3):
-    # หมายเหตุ: ปรับใช้โค้ดดึงข้อมูลจาก FAISS / Chunks เอกสารเดิมของคุณตรงส่วนนี้
-    # ตัวอย่างโครงสร้างส่งกลับ: (retrieved_chunks, retrieved_sources)
-    return [], []
+    query_vector = embedder.encode([query], convert_to_numpy=True).astype('float32')
+    distances, indices = faiss_index.search(query_vector, min(top_k, len(doc_chunks)))
+    
+    retrieved_chunks = []
+    retrieved_sources = []
+    for idx in indices[0]:
+        if 0 <= idx < len(doc_chunks):
+            retrieved_chunks.append(doc_chunks[idx])
+            retrieved_sources.append(doc_sources[idx])
+            
+    return retrieved_chunks, retrieved_sources
 
 # --------------------------------------------------
 # 4. RAG Response Generation Function
 # --------------------------------------------------
 def generate_rag_response(query, retrieved_chunks, retrieved_sources):
     context_str = "\n\n".join(retrieved_chunks) if retrieved_chunks else "ไม่มีข้อมูลในบริบท"
+    valid_sources = [s for s in set(retrieved_sources) if s != "none"]
+    sources_str = ", ".join(valid_sources) if valid_sources else "ไม่พบเอกสารอ้างอิง"
     
     prompt = f"""คุณคือ AI ผู้ช่วยตอบคำถามการท่องเที่ยวจังหวัดเชียงใหม่
 คำสั่งสำคัญ:
@@ -60,7 +111,6 @@ Context ที่ค้นหาได้:
 คำถาม: {query}
 """
 
-    # วนลูปทดสอบเรียกใช้รายชื่อโมเดล เพื่อป้องกัน Error 404
     candidate_models = [
         'gemini-1.5-flash',
         'gemini-1.5-pro',
@@ -81,7 +131,7 @@ Context ที่ค้นหาได้:
             continue
             
     if response_text:
-        return response_text
+        return f"{response_text}\n\n📄 **เอกสารอ้างอิง:** {sources_str}"
     else:
         return "ไม่สามารถเชื่อมต่อโมเดล Gemini ได้ กรุณาตรวจสอบสิทธิ์และสถานะของ API Key"
 
